@@ -1,0 +1,280 @@
+---
+title: "London TfL Accidents Report (2019)"
+subtitle: "LSE ME204 2023 - Final Project"
+author: "Narayan Murti (202277950)"
+date: "2023-07-31"
+output: 
+  html_document:
+    df_print: kable
+    code_folding: hide
+    toc: true
+    toc_float: true
+    theme: simplex
+    fig_width: 10
+    fig_height: 6
+---
+
+# ⚙️ Setup
+
+I will discuss 2019 accident statistics from *Transport for London* (TfL), the governing body behind London's transport network.
+
+#### Data Collection
+
+See "R/data_collection.R" for in-depth data collection process.
+
+```{r, warning=FALSE, message=FALSE}
+source("R/data_collection.R")
+
+# Save tfl accident stats into a json file in "data/raw"
+get_tfl_accident_stats()
+
+# Save borough population stats into a csv file in "data/raw"
+get_borough_population()
+```
+
+#### Preprocessing
+
+Read in raw json file and csv file, then create a SQLite database connection to store tables.
+
+``` r
+accident_stats <- read_json("data/raw/tfl_accident_stats.json")
+                 
+borough_population <- read_csv("data/raw/borough_population.csv")
+
+tfl_db <- dbConnect(drv = RSQLite::SQLite(),
+                 "data/tidy/tfl.db") 
+```
+
+Organize and store preferred tables into the SQLite database.
+
+See "R/preprocessing.R" for in-depth preprocessing procedures.
+
+```{r, warning=FALSE, message=FALSE}
+source("R/preprocessing.R")
+
+preprocess_accidents_table()
+
+preprocess_casualties_table()
+
+preprocess_borough_population_table()
+```
+
+# 💾 The Data
+
+I accessed TfL's API to obtain 2019 accident statistics detailing location, time, and casualty information (defined as people slightly, severely, or fatally injured by the accident).
+
+We can draw valuable conclusions from this data because by looking at trends within different boroughs, different modes of transport, age groups, and times of the year or day.
+
+Here were the two tables I extracted from the TfL API:
+
+#### General Accident Information
+
+```{r}
+accidents_tbl <- tbl(tfl_db, "accidents")
+
+accidents_tbl %>%
+  head()
+```
+
+#### Casualty Stats
+
+```{r}
+casualties_tbl <- tbl(tfl_db, "casualties")
+
+casualties_tbl %>%
+  head()
+```
+
+
+
+
+
+#### Borough Populations
+
+I then webscraped the HTML of a website containing census information from each of London's boroughs. This enhanced conclusions we could draw from the borough information in our accident statistics.
+
+```{r}
+population_tbl <- tbl(tfl_db, "borough_population")
+
+population_tbl %>%
+  head()
+```
+
+I needed to make seperate tables to complete my preprocessing because the data under the "casualties" column was contained in a nested list, so I needed a separate process to obtain this data.
+
+The following processes were required to preprocess these three tables in the desired way:
+
+> - TfL API
+>     - Accidents Table
+>          - Create function to obtain data row-by-row from selected columns
+>          - Save resulting df into the tfl.db database
+>     - Casualties Table
+>          - Create a similar function as above, but require a nested lapply function
+>          - Save resulting df into the tfl.db database
+
+> - Borough Population Website
+>     - Borough Population Table
+>          - Since the data was webscraped as an html table node, data is already a df
+>          - Select desired columns and save resulting df to tfl.db database
+
+
+# 🚁 Big Picture
+
+#### Accidents Per Borough
+Accidents per borough gives us a general overview of which boroughs are the biggest probelem areas for transportation accidents.
+
+**Note: I omitted "City of London" from the bar chart on the basis of it being an outlier due to abnormally small land area compared to high traffic**  
+
+```{r, warning=FALSE, message=FALSE}
+source("R/data_viz.R")
+
+accidents_per_borough(accidents_tbl)
+```
+
+
+#### Per Capita Accidents Per Borough
+To get a better understanding of the significance of the above plot, we should also examine accidents per capita using the borough population data we webscraped seperately from the TfL API. To setup this chart, I performed an inner join between the Borough Population Table and Accidents Table on the "borough" columns. 
+
+I then computed accidents per capita for each borough and added that as a column in this new dataframe. The entire dataframe was computed as follows:
+
+**Note: Observe same "City of London" note as above**
+
+```r
+plot_df <- accidents_tbl %>% 
+    group_by(borough) %>% 
+    count() %>%
+    inner_join(population_tbl) %>%
+    mutate("accidents_per_capita" = (as.double(n)/as.double(population))) %>%
+    select(borough, accidents_per_capita) %>%
+    
+    # Note: removed City of London borough row because its low population & size 
+    # relative to its high foot traffic skewed this graph considerably.
+    filter(borough != "City of London")
+```
+
+Our resulting plot shows an interesting result that City of Westminster still leads the rest of the boroughs by a considerable amount, even when borough population is taken into account. We will explore more specifically about City of Westminster in the following section.
+
+```{r, warning=FALSE, message=FALSE}
+accidents_per_borough_per_capita(accidents_tbl, population_tbl)
+```
+
+#### Accidents Throughout the Year
+To get an overview of the time data, we will examine number of accidents throughout the year. In order to do this, I needed to convert my date column into datetime format, then omit the time information from this column with the lubridate package.
+
+```r
+plot_df <- accidents_tbl %>% 
+    collect() %>% 
+    mutate(date = as_datetime(date)) %>%
+    mutate(date = date(date)) %>%
+    group_by(date) %>%
+    count()
+```
+
+This is a useful illustration that shows how the number of accidents fluctuated throughout 2019. It shows that accidents peak around the end of the year and fall lowest at the beginning of the year.
+
+```{r, warning=FALSE, message=FALSE}
+accidents_over_year(accidents_tbl)
+```
+
+
+#### Casualties by Mode of Transport
+We now want to find out how these injuries are happening, so we will inspect the mode column of the Casualties Table. This graph shows us the mode by which the injured person was traveling. So, "Car" means that the injured person was a driver or passenger in a car, "Pedestrian" means that the injured person was traveling on foot, etc.
+
+We see that drivers or passengers of cars experienced the most amount of casualties over other methods of transportation. It is important to remember that TfL defines "casualties" not as deaths, but as injuries that are either slight, serious, or fatal.
+
+```{r, warning=FALSE, message=FALSE}
+casualties_by_mode(casualties_tbl)
+```
+
+
+#### Serious or Fatal Casualties by Mode of Transport
+When we restrict the Casualties Table to only include serious or fatal casualties, we see an interesting result: Pedestrian, Motorcycle, and Bicycle casualties overtake Car casualties when "slight" casualties are not considered. This may mean that Car injuries are more frequent, yet Pedestrian, motorcyle, and bicycle injuries are more dangerous.  
+
+```{r}
+casualties_by_mode_serious(casualties_tbl)
+```
+
+# 📈 Further Exploratory Analysis
+
+#### Accidents Per Hour
+We want to find out what times of day led to the most accidents in 2019. To create this ciruclar barplot, I needed to apply the `coord_polar()` function to the barplot of the following dataframe:
+
+```r
+ plot_df <- accidents_tbl %>% 
+    collect() %>% 
+    mutate(date = as_datetime(date)) %>%
+    mutate(hour = hour(date)) %>%
+    group_by(hour)
+```
+Using lubridate, I converted my date column to datetime format, then pulled only the hour element from my date data into a new hour column. Then, grouping by hour, I was albe to visualize the problematic hours. The morning and evening spikes can likely be attributed to rush hour transport, which is what we expect.
+
+It is interesting that the 8am spike is much more abrupt than the gradual 3-6pm spike. This shows how it gradually gets busier in the evenings, followed by a sharp drop off after 7pm. 
+
+
+```{r}
+accidents_per_hour_severity(accidents_tbl)
+```
+
+
+
+The following four plots use this inner join on `accidentsId` between the Accidents and Casualties tables to display information about the age ranges of those injured:
+
+```r
+plot_df <- accidents_tbl %>% 
+    inner_join(casualties_tbl, by = c("id" = "accidentId"))
+```
+
+They are all followed by different preprocessing procedures that extract the specific information we want for each given graph.
+
+Also, each of the following plots contained this mutate call including the `cut()` function to sort the ages in the data into 10-year bins so that the visualization was more informative:
+
+```r
+mutate(age_range = as.character(cut(age,
+                                        breaks = c(0, 10, 20, 30, 40, 50,
+                                                   60, 70, 80, 90, 100),
+                                        labels = c("0-10", "11-20",
+                                                   "21-30", "31-40",
+                                                   "41-50", "51-60",
+                                                   "61-70", "71-80",
+                                                   "81-90", "91-100"))))
+```
+
+
+#### Age Range for All Boroughs
+We see that 21-30 year olds experience the highest number of transport accidents across all boroughs.
+
+```{r}
+casualty_age_and_mode(accidents_tbl, casualties_tbl)
+```
+
+#### Age Range for Borough of Harrow
+I wanted to take a look at the Borough of Harrow since it had the lowest accidents per capita in all of London. We see that the accidents are much more evenly spread out among different age groups.
+
+```{r}
+harrow_age_and_mode(accidents_tbl, casualties_tbl)
+```
+
+#### Age range for City of Westminster
+
+###### Severe or Fatal Cases
+This chart continues to illustrate how relatively insignificant Car injuries are when only focusing on Severe or Fatal injuries.  We see the majority of each age group occupied by Pedestrian or Bicycle injuries and much less diversity overall in modes of transport. 
+
+```{r}
+westminster_age_and_mode(accidents_tbl, casualties_tbl)
+```
+
+
+###### Only Car or Pedestrian Cases (Most Problematic)
+When we pull out only Car and Pedestrian cases in City of Westminster for all Severity types, we see that older travelers experience a higher proportion of pedestrian injuries, but middle-aged travelers experience more car injuries.
+
+```{r}
+westminster_only_car_pedestrian(accidents_tbl, casualties_tbl)
+```
+
+# ⏭️ Future
+
+To continue with this project, I would be very interested in including London Underground accidents and delays and how that relates to other TfL accidents. I would gather info on tube stations per borough and average business of each tube station (users per day or per month of each station). This information would be far more valuable than the population of each borough because the population doesn't necessarily account for the number of people traveling, especially with the amount of tourists that London reveives. This is likely one of the reasons why I had to omit the City of London borough from my data, as it caused an outlier for its high amount of accidents per capita.
+
+In addition to London Underground data, I would like to dive deeper into the issues of the City of Westminster. It is fascinating that it leads both gross and per capita accidents, so I would like to continue exploring what causes these accidents and who it affects. I would also like to narrow down much tighter than boroughs. The TfL API included location descriptions as well at latitude and longitude, so with enough tidying, I could get much more specific on where the problem areas are in Westminster. This would lead to more interesting and productive conclusions.
+
+Finally, I would like to span this information across several years to see patterns in frequent modes of transport in accidents and where the most dangerous areas have moved from. This allows us to lay timelines of city infrastructure projects side by side with accidents plots and see where infrastructure improvements have made differences in the efficienty and safety of London transport. This is the overall motivation of my interest in this topic because these networks heavily impact our daily lives and are running constantly all around us.
