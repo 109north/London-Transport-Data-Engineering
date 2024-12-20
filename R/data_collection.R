@@ -12,7 +12,7 @@ get_tfl_accident_stats <- function() {
   url <- "https://api.tfl.gov.uk/AccidentStats/2019"
   
   response <- request(url) %>% 
-    req_auth_bearer_token("c6a81dc38e4242dd8b16f65ee76d9206") %>% 
+    req_auth_bearer_token("######################") %>% # token hidden
     req_perform()
   
   body <- response %>% 
